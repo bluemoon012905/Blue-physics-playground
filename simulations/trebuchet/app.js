@@ -64,16 +64,18 @@ const state = {
 const world = {
   metersPerCell: 1.25,
   groundRow: 15,
-  groundBounce: 0.32,
-  groundFriction: 0.08,
+  groundBounce: 0.05,
+  groundFriction: 0.04,
   settleVelocity: 0.12,
   settleAngularVelocity: 0.001,
   gravityStep: 0.12,
   gravityForceScale: 18,
-  impactForceScale: 4.2,
-  airDamping: 0.999,
-  angularDamping: 0.998,
-  jointIterations: 8,
+  impactForceScale: 1.4,
+  airDamping: 0.996,
+  angularDamping: 0.988,
+  jointIterations: 12,
+  maxLinearSpeed: 4,
+  maxAngularSpeed: 0.045,
 };
 
 function degToRad(value) {
@@ -141,14 +143,51 @@ function segmentLengthCells(segment) {
   return distance(segment.start, segment.end);
 }
 
+function findNearestJoint(cell, maxDistance = 1.25) {
+  let bestJoint = null;
+  let bestDistance = Infinity;
+
+  state.joints.forEach((joint) => {
+    const currentDistance = distance(cell, joint);
+    if (currentDistance <= maxDistance && currentDistance < bestDistance) {
+      bestDistance = currentDistance;
+      bestJoint = joint;
+    }
+  });
+
+  return bestJoint;
+}
+
+function findNearestSegmentEndpoint(cell, maxDistance = 1.25) {
+  let bestCell = null;
+  let bestDistance = Infinity;
+
+  state.segments.forEach((segment) => {
+    [segment.start, segment.end].forEach((endpoint) => {
+      const currentDistance = distance(cell, endpoint);
+      if (currentDistance <= maxDistance && currentDistance < bestDistance) {
+        bestDistance = currentDistance;
+        bestCell = endpoint;
+      }
+    });
+  });
+
+  return bestCell;
+}
+
+function snapCell(cell) {
+  return findNearestJoint(cell) ?? findNearestSegmentEndpoint(cell) ?? cell;
+}
+
 function toggleJoint(cell) {
-  const existingIndex = state.joints.findIndex((joint) => cellsEqual(joint, cell));
+  const snappedCell = findNearestSegmentEndpoint(cell) ?? cell;
+  const existingIndex = state.joints.findIndex((joint) => cellsEqual(joint, snappedCell));
   if (existingIndex >= 0) {
     state.joints.splice(existingIndex, 1);
     return;
   }
 
-  state.joints.push(cell);
+  state.joints.push(snappedCell);
 }
 
 function analyzeForces(loadFactor = 1) {
@@ -242,13 +281,16 @@ function initializePhysicsBodies() {
 }
 
 function addSegment(start, end, material) {
-  if (cellsEqual(start, end)) {
+  const snappedStart = snapCell(start);
+  const snappedEnd = snapCell(end);
+
+  if (cellsEqual(snappedStart, snappedEnd)) {
     return;
   }
 
   state.segments.push({
-    start,
-    end,
+    start: snappedStart,
+    end: snappedEnd,
     material,
     broken: false,
     force: 0,
@@ -389,6 +431,7 @@ function updateLaunch() {
     body.vx *= world.airDamping;
     body.vy *= world.airDamping;
     body.omega *= world.angularDamping;
+    clampBodyMotion(body);
     body.x += body.vx;
     body.y += body.vy;
     body.angle += body.omega;
@@ -409,6 +452,7 @@ function updateLaunch() {
     solveJointConstraints();
     solveGroundCollisions();
   }
+  solveJointConstraints();
 
   analyzeForces(1);
 
@@ -466,19 +510,40 @@ function getBodyPointVelocity(body, endpoint) {
 }
 
 function applyBodyPointCorrection(body, endpoint, correction, strength = 1) {
+  applyBodyPointCorrectionWithMode(body, endpoint, correction, strength, true);
+}
+
+function applyBodyPointCorrectionWithMode(body, endpoint, correction, strength = 1, allowRotation = true) {
   const local = getBodyLocalPoint(body, endpoint);
   body.x += correction.x * 0.5 * strength;
   body.y += correction.y * 0.5 * strength;
-  const torque = (local.x * correction.y - local.y * correction.x) / Math.max(body.inertia, 1);
-  body.angle += torque * 0.6 * strength;
+  if (allowRotation) {
+    const torque = (local.x * correction.y - local.y * correction.x) / Math.max(body.inertia, 1);
+    body.angle += torque * 0.12 * strength;
+  }
 }
 
 function applyBodyPointVelocityDelta(body, endpoint, delta) {
   const local = getBodyLocalPoint(body, endpoint);
-  body.vx += delta.x * 0.65;
-  body.vy += delta.y * 0.65;
+  body.vx += delta.x * 0.2;
+  body.vy += delta.y * 0.2;
   const impulseTorque = (local.x * delta.y - local.y * delta.x) / Math.max(body.inertia, 1);
-  body.omega += impulseTorque * 22;
+  body.omega += impulseTorque * 1.1;
+  clampBodyMotion(body);
+}
+
+function applyBodyPointVelocityMatch(body, endpoint, targetVelocity, strength = 0.12) {
+  const current = getBodyPointVelocity(body, endpoint);
+  applyBodyPointVelocityDelta(body, endpoint, {
+    x: (targetVelocity.x - current.x) * strength,
+    y: (targetVelocity.y - current.y) * strength,
+  });
+}
+
+function clampBodyMotion(body) {
+  body.vx = clamp(body.vx, -world.maxLinearSpeed, world.maxLinearSpeed);
+  body.vy = clamp(body.vy, -world.maxLinearSpeed, world.maxLinearSpeed);
+  body.omega = clamp(body.omega, -world.maxAngularSpeed, world.maxAngularSpeed);
 }
 
 function solveJointConstraints() {
@@ -495,18 +560,32 @@ function solveJointConstraints() {
       getBodyPoint(state.bodyStates.get(segmentIndex), endpoint),
     );
 
+    const averagePoint = {
+      x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+      y: points.reduce((sum, point) => sum + point.y, 0) / points.length,
+    };
+
     const target = jointState.anchored
-      ? { x: cellCenter(jointState.joint).x, y: cellCenter(jointState.joint).y }
-      : {
-          x: (points.reduce((sum, point) => sum + point.x, 0) + jointState.x) / (points.length + 1),
-          y: (points.reduce((sum, point) => sum + point.y, 0) + jointState.y) / (points.length + 1),
-        };
+      ? cellCenter(jointState.joint)
+      : averagePoint;
 
     if (!jointState.anchored) {
-      jointState.x += (target.x - jointState.x) * 0.9;
-      jointState.y += (target.y - jointState.y) * 0.9;
-      jointState.vx += (target.x - jointState.x) * 0.03;
-      jointState.vy += (target.y - jointState.y) * 0.03;
+      jointState.x = target.x;
+      jointState.y = target.y;
+
+      const averageVelocity = attachments.reduce(
+        (accumulator, { segmentIndex, endpoint }) => {
+          const velocity = getBodyPointVelocity(state.bodyStates.get(segmentIndex), endpoint);
+          return {
+            x: accumulator.x + velocity.x,
+            y: accumulator.y + velocity.y,
+          };
+        },
+        { x: 0, y: 0 },
+      );
+
+      jointState.vx = averageVelocity.x / attachments.length;
+      jointState.vy = averageVelocity.y / attachments.length;
     } else {
       jointState.x = target.x;
       jointState.y = target.y;
@@ -521,7 +600,15 @@ function solveJointConstraints() {
         x: target.x - point.x,
         y: target.y - point.y,
       };
-      applyBodyPointCorrection(body, endpoint, correction, jointState.anchored ? 1 : 0.9);
+      applyBodyPointCorrection(body, endpoint, correction, jointState.anchored ? 1 : 1);
+      applyBodyPointVelocityMatch(
+        body,
+        endpoint,
+        jointState.anchored
+          ? { x: 0, y: 0 }
+          : { x: jointState.vx, y: jointState.vy },
+        jointState.anchored ? 0.08 : 0.16,
+      );
     });
   });
 }
@@ -531,38 +618,61 @@ function solveGroundCollisions() {
 
   state.bodyStates.forEach((body, index) => {
     const segment = state.segments[index];
-    ["start", "end"].forEach((endpoint) => {
-      const point = getBodyPoint(body, endpoint);
-      if (point.y <= groundY) {
-        return;
-      }
-
-      const penetration = point.y - groundY;
-      applyBodyPointCorrection(body, endpoint, { x: 0, y: -penetration }, 1);
-
-      const velocity = getBodyPointVelocity(body, endpoint);
-      if (velocity.y > 0) {
-        const nextVelocity = {
-          x: velocity.x * (1 - world.groundFriction),
-          y: -velocity.y * world.groundBounce,
+    const contacts = ["start", "end"]
+      .map((endpoint) => {
+        const point = getBodyPoint(body, endpoint);
+        return {
+          endpoint,
+          point,
+          penetration: point.y - groundY,
+          velocity: getBodyPointVelocity(body, endpoint),
         };
-        applyBodyPointVelocityDelta(body, endpoint, {
-          x: nextVelocity.x - velocity.x,
-          y: nextVelocity.y - velocity.y,
-        });
-        segment.impactForce = Math.max(
-          segment.impactForce ?? 0,
-          body.mass * Math.abs(velocity.y) * world.impactForceScale,
-        );
+      })
+      .filter((contact) => contact.penetration > 0);
 
-        if (Math.abs(body.vy) < world.settleVelocity) {
-          body.vy = 0;
-        }
-        if (Math.abs(body.omega) < world.settleAngularVelocity) {
-          body.omega = 0;
-        }
-      }
-    });
+    if (contacts.length === 0) {
+      return;
+    }
+
+    const deepest = contacts.reduce((best, contact) =>
+      contact.penetration > best.penetration ? contact : best,
+    );
+
+    applyBodyPointCorrectionWithMode(
+      body,
+      deepest.endpoint,
+      { x: 0, y: -deepest.penetration },
+      1,
+      false,
+    );
+
+    if (deepest.velocity.y > 0) {
+      const nextVelocity = {
+        x: deepest.velocity.x * (1 - world.groundFriction),
+        y: -deepest.velocity.y * world.groundBounce,
+      };
+      applyBodyPointVelocityDelta(body, deepest.endpoint, {
+        x: nextVelocity.x - deepest.velocity.x,
+        y: nextVelocity.y - deepest.velocity.y,
+      });
+      segment.impactForce = Math.max(
+        segment.impactForce ?? 0,
+        body.mass * Math.abs(deepest.velocity.y) * world.impactForceScale,
+      );
+    }
+
+    if (contacts.length === 2) {
+      body.omega *= 0.92;
+      body.vx *= 1 - world.groundFriction;
+    }
+
+    if (Math.abs(body.vy) < world.settleVelocity) {
+      body.vy = 0;
+    }
+    if (Math.abs(body.omega) < world.settleAngularVelocity) {
+      body.omega = 0;
+    }
+    clampBodyMotion(body);
   });
 
   state.jointStates.forEach((jointState) => {
