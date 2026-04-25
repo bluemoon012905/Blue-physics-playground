@@ -68,16 +68,16 @@ const state = {
 const world = {
   groundRow: 15,
   gravityStep: 0.12,
-  gravityForceScale: 16,
+  gravityForceScale: 12,
   groundBounce: 0.04,
   groundFriction: 0.05,
   airDamping: 0.996,
-  angularDamping: 0.992,
-  settleVelocity: 0.08,
-  settleAngularVelocity: 0.0008,
+  angularDamping: 0.985,
+  settleVelocity: 0.15,
+  settleAngularVelocity: 0.003,
   maxLinearSpeed: 3.5,
   maxAngularSpeed: 0.035,
-  impactForceScale: 1.2,
+  impactForceScale: 4,
 };
 
 function clamp(value, min, max) {
@@ -425,20 +425,21 @@ function buildSegmentAdjacency(segmentIndexes) {
 }
 
 function initializeAssemblies(useCurrentState) {
+  const previousBindings = new Map(state.segmentBindings);
+  const previousAssemblies = new Map(state.assemblies);
   const nodeWorld = buildNodeWorldMap(useCurrentState);
+  const jointNodeKeys = new Set(state.joints.map((j) => keyForCell(j)));
   const nodeToSegments = new Map();
 
   state.segments.forEach((segment, index) => {
-    if (segment.broken) {
-      return;
-    }
-
     [segment.start, segment.end].forEach((cell) => {
       const key = keyForCell(cell);
       if (!nodeToSegments.has(key)) {
         nodeToSegments.set(key, []);
       }
-      nodeToSegments.get(key).push(index);
+      if (!segment.broken) {
+        nodeToSegments.get(key).push(index);
+      }
     });
   });
 
@@ -449,7 +450,58 @@ function initializeAssemblies(useCurrentState) {
   const visited = new Set();
 
   state.segments.forEach((segment, index) => {
-    if (segment.broken || visited.has(index)) {
+    if (visited.has(index)) {
+      return;
+    }
+
+    if (segment.broken) {
+      visited.add(index);
+      const startKey = keyForCell(segment.start);
+      const endKey = keyForCell(segment.end);
+      const startPoint = nodeWorld.get(startKey) ?? cellCenter(segment.start);
+      const endPoint = nodeWorld.get(endKey) ?? cellCenter(segment.end);
+      const centroid = {
+        x: (startPoint.x + endPoint.x) * 0.5,
+        y: (startPoint.y + endPoint.y) * 0.5,
+      };
+      const mass =
+        distance(segment.start, segment.end) * materialConfig[segment.material].density;
+      const nodeLocals = new Map([
+        [startKey, { x: startPoint.x - centroid.x, y: startPoint.y - centroid.y }],
+        [endKey, { x: endPoint.x - centroid.x, y: endPoint.y - centroid.y }],
+      ]);
+      const length = Math.hypot(endPoint.x - startPoint.x, endPoint.y - startPoint.y);
+      const inertia = Math.max(1, mass * (length * length) / 12);
+
+      const previous = useCurrentState ? previousBindings.get(index) : null;
+      const body = previous && previousAssemblies.has(previous.assemblyId)
+        ? previousAssemblies.get(previous.assemblyId)
+        : null;
+
+      const assemblyId = state.nextAssemblyId++;
+      const assembly = {
+        id: assemblyId,
+        x: centroid.x,
+        y: centroid.y,
+        vx: body?.vx ?? 0,
+        vy: body?.vy ?? 0,
+        angle: body?.angle ?? 0,
+        omega: body?.omega ?? 0,
+        mass: Math.max(1, mass),
+        inertia,
+        nodeLocals,
+        segmentIndexes: [index],
+        adjacency: new Map([[index, new Set()]]),
+        jointKeys: [],
+        contactSegments: [],
+      };
+
+      state.assemblies.set(assemblyId, assembly);
+      state.segmentBindings.set(index, {
+        assemblyId,
+        startKey,
+        endKey,
+      });
       return;
     }
 
@@ -469,11 +521,13 @@ function initializeAssemblies(useCurrentState) {
       [currentSegment.start, currentSegment.end].forEach((cell) => {
         const key = keyForCell(cell);
         nodeKeys.add(key);
-        (nodeToSegments.get(key) ?? []).forEach((neighbor) => {
-          if (!visited.has(neighbor)) {
-            queue.push(neighbor);
-          }
-        });
+        if (!jointNodeKeys.has(key)) {
+          (nodeToSegments.get(key) ?? []).forEach((neighbor) => {
+            if (!visited.has(neighbor)) {
+              queue.push(neighbor);
+            }
+          });
+        }
       });
     }
 
@@ -512,12 +566,12 @@ function initializeAssemblies(useCurrentState) {
     const assemblyId = state.nextAssemblyId++;
     const previous = useCurrentState
       ? segmentIndexes
-          .map((segmentIndex) => state.segmentBindings.get(segmentIndex))
+          .map((segmentIndex) => previousBindings.get(segmentIndex))
           .find(Boolean)
       : null;
 
-    const body = previous && state.assemblies.has(previous.assemblyId)
-      ? state.assemblies.get(previous.assemblyId)
+    const body = previous && previousAssemblies.has(previous.assemblyId)
+      ? previousAssemblies.get(previous.assemblyId)
       : null;
 
     const assembly = {
@@ -614,11 +668,6 @@ function applyImpulseAtLocalPoint(assembly, local, impulse) {
 }
 
 function getWorldPointForSegmentEndpoint(segmentIndex, endpoint) {
-  if (!state.physicsActive) {
-    const segment = state.segments[segmentIndex];
-    return cellCenter(endpoint === "start" ? segment.start : segment.end);
-  }
-
   const binding = state.segmentBindings.get(segmentIndex);
   if (!binding) {
     const segment = state.segments[segmentIndex];
@@ -626,6 +675,11 @@ function getWorldPointForSegmentEndpoint(segmentIndex, endpoint) {
   }
 
   const assembly = state.assemblies.get(binding.assemblyId);
+  if (!assembly) {
+    const segment = state.segments[segmentIndex];
+    return cellCenter(endpoint === "start" ? segment.start : segment.end);
+  }
+
   const key = endpoint === "start" ? binding.startKey : binding.endKey;
   return worldFromLocal(assembly, assembly.nodeLocals.get(key));
 }
@@ -699,28 +753,41 @@ function solveAssemblyGroundCollisions() {
 
     assembly.y -= deepest.penetration;
 
+    const fallSpeed = Math.max(0, assembly.vy);
+
     if (deepest.velocity.y > 0) {
-      const normalImpulse = -deepest.velocity.y * assembly.mass * (1 + world.groundBounce);
-      const frictionImpulse = -deepest.velocity.x * assembly.mass * world.groundFriction;
-      applyImpulseAtLocalPoint(assembly, deepest.local, {
-        x: frictionImpulse,
-        y: normalImpulse,
-      });
+      // Effective mass at the contact point for a vertical (ground-normal) impulse.
+      // The ground normal is (0, -1) in screen coords (upward).
+      // r × n  =  local.x * (−1) − local.y * 0  =  −local.x
+      // effective_mass = 1 / (1/M + (r × n)² / I)  =  1 / (1/M + local.x² / I)
+      const lx = deepest.local.x;
+      const effectiveMass = 1 / (1 / assembly.mass + (lx * lx) / assembly.inertia);
+      // j is the scalar impulse in the normal direction (positive = upward push).
+      const j = deepest.velocity.y * (1 + world.groundBounce) * effectiveMass;
+      // Apply (0, −j) impulse: reduces vy and corrects omega proportionally.
+      assembly.vy -= j / assembly.mass;
+      assembly.omega -= (j * lx) / assembly.inertia;
 
       distributeAssemblyImpact(
         assembly,
         deepest.segmentIndex,
-        Math.abs(normalImpulse) * world.impactForceScale / Math.max(assembly.segmentIndexes.length, 1),
+        fallSpeed * assembly.mass * world.impactForceScale / Math.max(assembly.segmentIndexes.length, 1),
       );
     }
 
+    clampAssemblyMotion(assembly);
+
+    assembly.omega *= 0.88;
     if (contacts.length > 1) {
-      assembly.omega *= 0.9;
       assembly.vx *= 1 - world.groundFriction;
+      assembly.omega *= 0.88;
     }
 
     if (Math.abs(assembly.vy) < world.settleVelocity) {
       assembly.vy = 0;
+    }
+    if (Math.abs(assembly.vx) < world.settleVelocity * 0.5) {
+      assembly.vx = 0;
     }
     if (Math.abs(assembly.omega) < world.settleAngularVelocity) {
       assembly.omega = 0;
@@ -738,6 +805,9 @@ function solveAssemblyGroundCollisions() {
     joint.vx *= 1 - world.groundFriction;
     if (Math.abs(joint.vy) < world.settleVelocity) {
       joint.vy = 0;
+    }
+    if (Math.abs(joint.vx) < world.settleVelocity * 0.5) {
+      joint.vx = 0;
     }
   });
 }
@@ -780,6 +850,54 @@ function analyzeForces(loadFactor = 1) {
   }
 }
 
+function constrainHingePair(A, la, B, lb) {
+  const posA = worldFromLocal(A, la);
+  const posB = worldFromLocal(B, lb);
+  const err = { x: posA.x - posB.x, y: posA.y - posB.y };
+  const bias = 0.4;
+  A.x -= err.x * bias * 0.5;
+  A.y -= err.y * bias * 0.5;
+  B.x += err.x * bias * 0.5;
+  B.y += err.y * bias * 0.5;
+
+  const velA = velocityAtLocalPoint(A, la);
+  const velB = velocityAtLocalPoint(B, lb);
+  const dv = { x: velA.x - velB.x, y: velA.y - velB.y };
+  const Kx = 1 / A.mass + la.y * la.y / A.inertia + 1 / B.mass + lb.y * lb.y / B.inertia;
+  const Ky = 1 / A.mass + la.x * la.x / A.inertia + 1 / B.mass + lb.x * lb.x / B.inertia;
+  const jx = -dv.x / Kx;
+  const jy = -dv.y / Ky;
+  A.vx += jx / A.mass;
+  A.vy += jy / A.mass;
+  A.omega += (la.x * jy - la.y * jx) / A.inertia;
+  B.vx -= jx / B.mass;
+  B.vy -= jy / B.mass;
+  B.omega -= (lb.x * jy - lb.y * jx) / B.inertia;
+  clampAssemblyMotion(A);
+  clampAssemblyMotion(B);
+}
+
+function solveHingeConstraints() {
+  state.joints.forEach((joint) => {
+    const key = keyForCell(joint);
+    const attached = [];
+    state.assemblies.forEach((assembly) => {
+      const local = assembly.nodeLocals.get(key);
+      if (local !== undefined) {
+        attached.push({ assembly, local });
+      }
+    });
+    if (attached.length < 2) {
+      return;
+    }
+    for (let i = 0; i < attached.length - 1; i += 1) {
+      for (let j = i + 1; j < attached.length; j += 1) {
+        constrainHingePair(attached[i].assembly, attached[i].local, attached[j].assembly, attached[j].local);
+      }
+    }
+  });
+}
+
 function updatePhysics() {
   if (!state.physicsActive) {
     return;
@@ -809,6 +927,9 @@ function updatePhysics() {
   });
 
   solveAssemblyGroundCollisions();
+  for (let i = 0; i < 5; i += 1) {
+    solveHingeConstraints();
+  }
   analyzeForces(1);
 
   let movingBodies = 0;
