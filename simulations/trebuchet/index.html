@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trebuchet | Blue Physics Playground</title>
+    <meta
+      name="description"
+      content="Draw wood and steel support members, place joints, and test whether the trebuchet frame breaks or falls under load."
+    />
+    <link rel="stylesheet" href="../../assets/css/site.css" />
+  </head>
+  <body>
+    <div class="page-shell simulation-page">
+      <header class="simulation-header">
+        <div>
+          <p class="eyebrow">Simulation 02</p>
+          <h1>Trebuchet Force Builder</h1>
+          <p class="hero-copy">
+            Drag support lines from point A to point B on the snap grid, place
+            joints where parts should pivot, and test whether the frame breaks or
+            falls under gravity and ground impact only.
+          </p>
+        </div>
+        <a class="button button-ghost" href="../../index.html">Back to main page</a>
+      </header>
+
+      <main class="trebuchet-builder">
+        <section class="canvas-panel trebuchet-stage">
+          <div class="stage-caption">
+            <div>
+              <strong>Support Frame</strong>
+              <span>Drag between grid points to add members. Click to place joints. Unsupported pieces will drop onto a flat ground plane during test launch.</span>
+            </div>
+            <div class="stage-badge" id="selected-tool-label">Tool: Wood Beam</div>
+          </div>
+
+          <canvas
+            id="trebuchet-canvas"
+            aria-label="Trebuchet support builder and force simulation canvas"
+          ></canvas>
+
+          <div class="builder-controls">
+            <div class="panel-block">
+              <div class="panel-header">
+                <h2>Tools</h2>
+                <p class="panel-copy">Choose a beam type or joint, then draw or place it on the grid.</p>
+              </div>
+
+              <div class="tool-grid" id="tool-grid">
+                <button class="tool-button is-active" data-tool="wood" type="button">
+                  <strong>Wood Beam</strong>
+                  <span>Breaks at 85 kN</span>
+                </button>
+                <button class="tool-button" data-tool="steel" type="button">
+                  <strong>Steel Beam</strong>
+                  <span>Breaks at 170 kN</span>
+                </button>
+                <button class="tool-button" data-tool="joint" type="button">
+                  <strong>Joint</strong>
+                  <span>Pivot point for attached parts</span>
+                </button>
+                <button class="tool-button" data-tool="erase" type="button">
+                  <strong>Eraser</strong>
+                  <span>Remove nearest member or joint</span>
+                </button>
+              </div>
+
+              <details class="tuning-panel" open>
+                <summary>Tuning</summary>
+                <div class="tuning-content">
+                  <p class="panel-copy">
+                    This test now uses a fixed gravity model. Draw members,
+                    place joints, and use the launch test to see what breaks or
+                    falls.
+                  </p>
+                </div>
+              </details>
+
+              <div class="button-row">
+                <button class="button button-primary" id="launch" type="button">
+                  Start Physics
+                </button>
+                <button class="button button-ghost" id="reset" type="button">
+                  Reset Damage
+                </button>
+                <button class="button button-ghost" id="clear-layout" type="button">
+                  Clear members
+                </button>
+              </div>
+            </div>
+
+            <div class="panel-block">
+              <div class="panel-header">
+                <h2>Force Readout</h2>
+                <p class="panel-copy">Only gravity and ground impact contribute force now.</p>
+              </div>
+
+              <div class="stat-list" aria-live="polite">
+                <div class="stat-row">
+                  <span>Status</span>
+                  <strong id="status-label">Ready</strong>
+                </div>
+                <div class="stat-row">
+                  <span>Gravity load</span>
+                  <strong id="applied-load-value">0 kN</strong>
+                </div>
+                <div class="stat-row">
+                  <span>Max member force</span>
+                  <strong id="max-force-value">0 kN</strong>
+                </div>
+                <div class="stat-row">
+                  <span>Broken members</span>
+                  <strong id="broken-count-value">0</strong>
+                </div>
+              </div>
+
+              <p class="panel-note">
+                Joints are pivots only. They do not add force themselves. Any
+                material not anchored to the ground will fall when physics starts.
+              </p>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="../../assets/js/site.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
