@@ -28,12 +28,14 @@ const materialConfig = {
     threshold: 85,
     color: "#d29b62",
     accent: "#f5c589",
+    density: 1.2,
   },
   steel: {
     label: "Steel",
     threshold: 170,
     color: "#84b6db",
     accent: "#cfeaff",
+    density: 2.1,
   },
 };
 
@@ -57,30 +59,26 @@ const state = {
   terrain: [],
   maxForce: 0,
   physicsActive: false,
-  bodyStates: new Map(),
-  jointStates: new Map(),
+  assemblies: new Map(),
+  segmentBindings: new Map(),
+  freeJoints: new Map(),
+  nextAssemblyId: 1,
 };
 
 const world = {
-  metersPerCell: 1.25,
   groundRow: 15,
-  groundBounce: 0.05,
-  groundFriction: 0.04,
-  settleVelocity: 0.12,
-  settleAngularVelocity: 0.001,
   gravityStep: 0.12,
-  gravityForceScale: 18,
-  impactForceScale: 1.4,
+  gravityForceScale: 16,
+  groundBounce: 0.04,
+  groundFriction: 0.05,
   airDamping: 0.996,
-  angularDamping: 0.988,
-  jointIterations: 12,
-  maxLinearSpeed: 4,
-  maxAngularSpeed: 0.045,
+  angularDamping: 0.992,
+  settleVelocity: 0.08,
+  settleAngularVelocity: 0.0008,
+  maxLinearSpeed: 3.5,
+  maxAngularSpeed: 0.035,
+  impactForceScale: 1.2,
 };
-
-function degToRad(value) {
-  return (value * Math.PI) / 180;
-}
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -125,6 +123,10 @@ function buildTerrain() {
   state.terrain = Array.from({ length: grid.cols }, () => world.groundRow);
 }
 
+function getGroundY() {
+  return grid.offsetY + world.groundRow * grid.cell;
+}
+
 function getCellFromPointer(event) {
   const rect = canvas.getBoundingClientRect();
   const x = event.clientX - rect.left;
@@ -137,10 +139,6 @@ function getCellFromPointer(event) {
   }
 
   return { x: gridX, y: gridY };
-}
-
-function segmentLengthCells(segment) {
-  return distance(segment.start, segment.end);
 }
 
 function findNearestJoint(cell, maxDistance = 1.25) {
@@ -180,29 +178,17 @@ function snapCell(cell) {
 }
 
 function canonicalizeStructure() {
-  const canonicalJointMap = new Map();
-  const dedupedJoints = [];
-
+  const uniqueJoints = new Map();
   state.joints.forEach((joint) => {
-    const key = keyForCell(joint);
-    if (!canonicalJointMap.has(key)) {
-      canonicalJointMap.set(key, joint);
-      dedupedJoints.push(joint);
-    }
+    uniqueJoints.set(keyForCell(joint), joint);
   });
+  state.joints = [...uniqueJoints.values()];
 
-  state.joints = dedupedJoints;
-
-  state.segments = state.segments.map((segment) => {
-    const startJoint = canonicalJointMap.get(keyForCell(segment.start));
-    const endJoint = canonicalJointMap.get(keyForCell(segment.end));
-
-    return {
-      ...segment,
-      start: startJoint ?? segment.start,
-      end: endJoint ?? segment.end,
-    };
-  });
+  state.segments = state.segments.map((segment) => ({
+    ...segment,
+    start: uniqueJoints.get(keyForCell(segment.start)) ?? segment.start,
+    end: uniqueJoints.get(keyForCell(segment.end)) ?? segment.end,
+  }));
 }
 
 function toggleJoint(cell) {
@@ -210,101 +196,10 @@ function toggleJoint(cell) {
   const existingIndex = state.joints.findIndex((joint) => cellsEqual(joint, snappedCell));
   if (existingIndex >= 0) {
     state.joints.splice(existingIndex, 1);
-    return;
+  } else {
+    state.joints.push(snappedCell);
   }
-
-  state.joints.push(snappedCell);
   canonicalizeStructure();
-}
-
-function analyzeForces(loadFactor = 1) {
-  const gravityLoad = loadFactor * world.gravityForceScale;
-
-  let maxForce = 0;
-  let brokenCount = state.segments.filter((segment) => segment.broken).length;
-
-  state.segments.forEach((segment, index) => {
-    if (segment.broken) {
-      segment.force = 0;
-      return;
-    }
-
-    const body = state.bodyStates.get(index);
-    const angle = body ? body.angle : Math.atan2(segment.end.y - segment.start.y, segment.end.x - segment.start.x);
-    const lengthFactor = 1 + segmentLengthCells(segment) * 0.1;
-    const orientationFactor = 0.85 + Math.abs(Math.cos(angle)) * 0.2;
-    const gravityForce = gravityLoad * lengthFactor * orientationFactor;
-    const impactForce = segment.impactForce ?? 0;
-    const force = gravityForce + impactForce;
-
-    segment.force = force;
-    maxForce = Math.max(maxForce, force);
-
-    const threshold = materialConfig[segment.material].threshold;
-    if (force > threshold) {
-      segment.broken = true;
-      brokenCount += 1;
-    }
-  });
-
-  state.maxForce = maxForce;
-  controls.appliedLoad.textContent = `${gravityLoad.toFixed(0)} kN`;
-  controls.maxForce.textContent = `${maxForce.toFixed(0)} kN`;
-  controls.brokenCount.textContent = `${brokenCount}`;
-}
-
-function initializePhysicsBodies() {
-  state.bodyStates = new Map();
-  state.jointStates = new Map();
-
-  state.segments.forEach((segment, index) => {
-    const start = cellCenter(segment.start);
-    const end = cellCenter(segment.end);
-    const length = Math.hypot(end.x - start.x, end.y - start.y);
-    const density = segment.material === "steel" ? 2.1 : 1.2;
-    const mass = Math.max(1, segmentLengthCells(segment) * density);
-
-    state.bodyStates.set(index, {
-      x: (start.x + end.x) * 0.5,
-      y: (start.y + end.y) * 0.5,
-      vx: 0,
-      vy: 0,
-      angle: Math.atan2(end.y - start.y, end.x - start.x),
-      omega: 0,
-      length,
-      mass,
-      inertia: Math.max(1, (mass * length * length) / 12),
-    });
-
-    segment.impactForce = 0;
-  });
-
-  state.joints.forEach((joint) => {
-    const point = cellCenter(joint);
-    const attachments = [];
-
-    state.segments.forEach((segment, index) => {
-      if (segment.broken) {
-        return;
-      }
-      if (cellsEqual(segment.start, joint)) {
-        attachments.push({ segmentIndex: index, endpoint: "start" });
-      }
-      if (cellsEqual(segment.end, joint)) {
-        attachments.push({ segmentIndex: index, endpoint: "end" });
-      }
-    });
-
-    state.jointStates.set(keyForCell(joint), {
-      joint,
-      x: point.x,
-      y: point.y,
-      vx: 0,
-      vy: 0,
-      anchored: joint.y >= world.groundRow,
-      attachments,
-    });
-  });
 }
 
 function addSegment(start, end, material) {
@@ -321,51 +216,9 @@ function addSegment(start, end, material) {
     material,
     broken: false,
     force: 0,
+    impactForce: 0,
   });
-
   canonicalizeStructure();
-}
-
-function removeNearestSegment(cell) {
-  if (state.segments.length === 0 && state.joints.length === 0) {
-    return;
-  }
-
-  const point = cellCenter(cell);
-  let bestIndex = -1;
-  let bestDistance = Infinity;
-  let bestType = "segment";
-
-  state.segments.forEach((segment, index) => {
-    const start = cellCenter(segment.start);
-    const end = cellCenter(segment.end);
-    const distanceToSegment = pointToSegmentDistance(point, start, end);
-
-    if (distanceToSegment < bestDistance) {
-      bestDistance = distanceToSegment;
-      bestIndex = index;
-      bestType = "segment";
-    }
-  });
-
-  state.joints.forEach((joint, index) => {
-    const jointPoint = cellCenter(joint);
-    const jointDistance = Math.hypot(point.x - jointPoint.x, point.y - jointPoint.y);
-    if (jointDistance < bestDistance) {
-      bestDistance = jointDistance;
-      bestIndex = index;
-      bestType = "joint";
-    }
-  });
-
-  if (bestIndex >= 0 && bestDistance <= grid.cell * 0.7) {
-    if (bestType === "segment") {
-      state.segments.splice(bestIndex, 1);
-    } else {
-      state.joints.splice(bestIndex, 1);
-    }
-    canonicalizeStructure();
-  }
 }
 
 function pointToSegmentDistance(point, start, end) {
@@ -389,6 +242,47 @@ function pointToSegmentDistance(point, start, end) {
   return Math.hypot(point.x - projection.x, point.y - projection.y);
 }
 
+function removeNearestSegment(cell) {
+  if (state.segments.length === 0 && state.joints.length === 0) {
+    return;
+  }
+
+  const point = cellCenter(cell);
+  let bestIndex = -1;
+  let bestDistance = Infinity;
+  let bestType = "segment";
+
+  state.segments.forEach((segment, index) => {
+    const start = cellCenter(segment.start);
+    const end = cellCenter(segment.end);
+    const currentDistance = pointToSegmentDistance(point, start, end);
+
+    if (currentDistance < bestDistance) {
+      bestDistance = currentDistance;
+      bestIndex = index;
+      bestType = "segment";
+    }
+  });
+
+  state.joints.forEach((joint, index) => {
+    const currentDistance = Math.hypot(point.x - cellCenter(joint).x, point.y - cellCenter(joint).y);
+    if (currentDistance < bestDistance) {
+      bestDistance = currentDistance;
+      bestIndex = index;
+      bestType = "joint";
+    }
+  });
+
+  if (bestIndex >= 0 && bestDistance <= grid.cell * 0.7) {
+    if (bestType === "segment") {
+      state.segments.splice(bestIndex, 1);
+    } else {
+      state.joints.splice(bestIndex, 1);
+    }
+    canonicalizeStructure();
+  }
+}
+
 function resetDamage() {
   canonicalizeStructure();
   state.segments.forEach((segment) => {
@@ -397,8 +291,9 @@ function resetDamage() {
     segment.impactForce = 0;
   });
   state.physicsActive = false;
-  state.bodyStates = new Map();
-  state.jointStates = new Map();
+  state.assemblies = new Map();
+  state.segmentBindings = new Map();
+  state.freeJoints = new Map();
   setStatus("Ready");
   analyzeForces(0);
 }
@@ -407,8 +302,9 @@ function clearSegments() {
   state.segments = [];
   state.joints = [];
   state.physicsActive = false;
-  state.bodyStates = new Map();
-  state.jointStates = new Map();
+  state.assemblies = new Map();
+  state.segmentBindings = new Map();
+  state.freeJoints = new Map();
   setStatus("Ready");
   analyzeForces(0);
 }
@@ -431,6 +327,246 @@ function resizeCanvas() {
   analyzeForces(0);
 }
 
+function getCurrentPointForNode(nodeKey) {
+  if (!state.physicsActive) {
+    const [x, y] = nodeKey.split(",").map(Number);
+    return cellCenter({ x, y });
+  }
+
+  for (const assembly of state.assemblies.values()) {
+    const local = assembly.nodeLocals.get(nodeKey);
+    if (local) {
+      return worldFromLocal(assembly, local);
+    }
+  }
+
+  const freeJoint = state.freeJoints.get(nodeKey);
+  if (freeJoint) {
+    return { x: freeJoint.x, y: freeJoint.y };
+  }
+
+  const [x, y] = nodeKey.split(",").map(Number);
+  return cellCenter({ x, y });
+}
+
+function buildNodeWorldMap(useCurrentState) {
+  const nodeSamples = new Map();
+
+  const addSample = (nodeKey, point) => {
+    if (!nodeSamples.has(nodeKey)) {
+      nodeSamples.set(nodeKey, []);
+    }
+    nodeSamples.get(nodeKey).push(point);
+  };
+
+  state.segments.forEach((segment) => {
+    if (segment.broken && !useCurrentState) {
+      return;
+    }
+    addSample(
+      keyForCell(segment.start),
+      useCurrentState ? getCurrentPointForNode(keyForCell(segment.start)) : cellCenter(segment.start),
+    );
+    addSample(
+      keyForCell(segment.end),
+      useCurrentState ? getCurrentPointForNode(keyForCell(segment.end)) : cellCenter(segment.end),
+    );
+  });
+
+  state.joints.forEach((joint) => {
+    addSample(
+      keyForCell(joint),
+      useCurrentState ? getCurrentPointForNode(keyForCell(joint)) : cellCenter(joint),
+    );
+  });
+
+  const nodeWorld = new Map();
+  nodeSamples.forEach((samples, key) => {
+    const average = samples.reduce(
+      (accumulator, point) => ({ x: accumulator.x + point.x, y: accumulator.y + point.y }),
+      { x: 0, y: 0 },
+    );
+    nodeWorld.set(key, {
+      x: average.x / samples.length,
+      y: average.y / samples.length,
+    });
+  });
+
+  return nodeWorld;
+}
+
+function buildSegmentAdjacency(segmentIndexes) {
+  const nodeToSegments = new Map();
+  segmentIndexes.forEach((index) => {
+    const segment = state.segments[index];
+    [segment.start, segment.end].forEach((cell) => {
+      const key = keyForCell(cell);
+      if (!nodeToSegments.has(key)) {
+        nodeToSegments.set(key, []);
+      }
+      nodeToSegments.get(key).push(index);
+    });
+  });
+
+  const adjacency = new Map();
+  segmentIndexes.forEach((index) => adjacency.set(index, new Set()));
+
+  nodeToSegments.forEach((indexes) => {
+    indexes.forEach((index) => {
+      indexes.forEach((other) => {
+        if (index !== other) {
+          adjacency.get(index).add(other);
+        }
+      });
+    });
+  });
+
+  return adjacency;
+}
+
+function initializeAssemblies(useCurrentState) {
+  const nodeWorld = buildNodeWorldMap(useCurrentState);
+  const nodeToSegments = new Map();
+
+  state.segments.forEach((segment, index) => {
+    if (segment.broken) {
+      return;
+    }
+
+    [segment.start, segment.end].forEach((cell) => {
+      const key = keyForCell(cell);
+      if (!nodeToSegments.has(key)) {
+        nodeToSegments.set(key, []);
+      }
+      nodeToSegments.get(key).push(index);
+    });
+  });
+
+  state.assemblies = new Map();
+  state.segmentBindings = new Map();
+  state.freeJoints = new Map();
+
+  const visited = new Set();
+
+  state.segments.forEach((segment, index) => {
+    if (segment.broken || visited.has(index)) {
+      return;
+    }
+
+    const queue = [index];
+    const segmentIndexes = [];
+    const nodeKeys = new Set();
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (visited.has(current)) {
+        continue;
+      }
+      visited.add(current);
+      segmentIndexes.push(current);
+
+      const currentSegment = state.segments[current];
+      [currentSegment.start, currentSegment.end].forEach((cell) => {
+        const key = keyForCell(cell);
+        nodeKeys.add(key);
+        (nodeToSegments.get(key) ?? []).forEach((neighbor) => {
+          if (!visited.has(neighbor)) {
+            queue.push(neighbor);
+          }
+        });
+      });
+    }
+
+    const points = [...nodeKeys].map((key) => nodeWorld.get(key)).filter(Boolean);
+    const centroid = points.reduce(
+      (accumulator, point) => ({ x: accumulator.x + point.x, y: accumulator.y + point.y }),
+      { x: 0, y: 0 },
+    );
+    centroid.x /= points.length;
+    centroid.y /= points.length;
+
+    const mass = segmentIndexes.reduce((sum, segmentIndex) => {
+      const currentSegment = state.segments[segmentIndex];
+      return sum + distance(currentSegment.start, currentSegment.end) * materialConfig[currentSegment.material].density;
+    }, 0);
+
+    const nodeLocals = new Map();
+    [...nodeKeys].forEach((key) => {
+      const point = nodeWorld.get(key);
+      nodeLocals.set(key, { x: point.x - centroid.x, y: point.y - centroid.y });
+    });
+
+    let inertia = 0;
+    segmentIndexes.forEach((segmentIndex) => {
+      const currentSegment = state.segments[segmentIndex];
+      const start = nodeWorld.get(keyForCell(currentSegment.start));
+      const end = nodeWorld.get(keyForCell(currentSegment.end));
+      const segmentMass =
+        distance(currentSegment.start, currentSegment.end) * materialConfig[currentSegment.material].density;
+      const center = { x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5 };
+      const radiusSquared = (center.x - centroid.x) ** 2 + (center.y - centroid.y) ** 2;
+      const length = Math.hypot(end.x - start.x, end.y - start.y);
+      inertia += segmentMass * ((length * length) / 12 + radiusSquared);
+    });
+
+    const assemblyId = state.nextAssemblyId++;
+    const previous = useCurrentState
+      ? segmentIndexes
+          .map((segmentIndex) => state.segmentBindings.get(segmentIndex))
+          .find(Boolean)
+      : null;
+
+    const body = previous && state.assemblies.has(previous.assemblyId)
+      ? state.assemblies.get(previous.assemblyId)
+      : null;
+
+    const assembly = {
+      id: assemblyId,
+      x: centroid.x,
+      y: centroid.y,
+      vx: body?.vx ?? 0,
+      vy: body?.vy ?? 0,
+      angle: 0,
+      omega: body?.omega ?? 0,
+      mass: Math.max(1, mass),
+      inertia: Math.max(1, inertia),
+      nodeLocals,
+      segmentIndexes,
+      adjacency: buildSegmentAdjacency(segmentIndexes),
+      jointKeys: state.joints
+        .map((joint) => keyForCell(joint))
+        .filter((key) => nodeKeys.has(key)),
+      contactSegments: [],
+    };
+
+    state.assemblies.set(assemblyId, assembly);
+    segmentIndexes.forEach((segmentIndex) => {
+      const currentSegment = state.segments[segmentIndex];
+      state.segmentBindings.set(segmentIndex, {
+        assemblyId,
+        startKey: keyForCell(currentSegment.start),
+        endKey: keyForCell(currentSegment.end),
+      });
+    });
+  });
+
+  state.joints.forEach((joint) => {
+    const key = keyForCell(joint);
+    const attached = [...state.assemblies.values()].some((assembly) => assembly.nodeLocals.has(key));
+    if (attached) {
+      return;
+    }
+
+    const point = nodeWorld.get(key) ?? cellCenter(joint);
+    state.freeJoints.set(key, {
+      x: point.x,
+      y: point.y,
+      vx: 0,
+      vy: 0,
+    });
+  });
+}
+
 function launch() {
   if (state.segments.length === 0 && state.joints.length === 0) {
     setStatus("Draw something first");
@@ -443,224 +579,115 @@ function launch() {
     segment.force = 0;
     segment.impactForce = 0;
   });
-  initializePhysicsBodies();
+  initializeAssemblies(state.physicsActive);
   state.physicsActive = true;
   setStatus("Physics running");
 }
 
-function updateLaunch() {
+function clampAssemblyMotion(assembly) {
+  assembly.vx = clamp(assembly.vx, -world.maxLinearSpeed, world.maxLinearSpeed);
+  assembly.vy = clamp(assembly.vy, -world.maxLinearSpeed, world.maxLinearSpeed);
+  assembly.omega = clamp(assembly.omega, -world.maxAngularSpeed, world.maxAngularSpeed);
+}
+
+function worldFromLocal(assembly, local) {
+  const cos = Math.cos(assembly.angle);
+  const sin = Math.sin(assembly.angle);
+  return {
+    x: assembly.x + local.x * cos - local.y * sin,
+    y: assembly.y + local.x * sin + local.y * cos,
+  };
+}
+
+function velocityAtLocalPoint(assembly, local) {
+  return {
+    x: assembly.vx - assembly.omega * local.y,
+    y: assembly.vy + assembly.omega * local.x,
+  };
+}
+
+function applyImpulseAtLocalPoint(assembly, local, impulse) {
+  assembly.vx += impulse.x / assembly.mass;
+  assembly.vy += impulse.y / assembly.mass;
+  assembly.omega += (local.x * impulse.y - local.y * impulse.x) / assembly.inertia;
+  clampAssemblyMotion(assembly);
+}
+
+function getWorldPointForSegmentEndpoint(segmentIndex, endpoint) {
   if (!state.physicsActive) {
-    return;
+    const segment = state.segments[segmentIndex];
+    return cellCenter(endpoint === "start" ? segment.start : segment.end);
   }
-  const gravityStep = world.gravityStep;
 
-  state.segments.forEach((segment) => {
-    segment.impactForce = (segment.impactForce ?? 0) * 0.9;
-  });
-
-  state.bodyStates.forEach((body, index) => {
-    body.vy += gravityStep;
-    body.vx *= world.airDamping;
-    body.vy *= world.airDamping;
-    body.omega *= world.angularDamping;
-    clampBodyMotion(body);
-    body.x += body.vx;
-    body.y += body.vy;
-    body.angle += body.omega;
-  });
-
-  state.jointStates.forEach((joint) => {
-    if (joint.anchored) {
-      return;
-    }
-    joint.vy += gravityStep;
-    joint.vx *= world.airDamping;
-    joint.vy *= world.airDamping;
-    joint.x += joint.vx;
-    joint.y += joint.vy;
-  });
-
-  for (let iteration = 0; iteration < world.jointIterations; iteration += 1) {
-    solveJointConstraints();
-    solveGroundCollisions();
+  const binding = state.segmentBindings.get(segmentIndex);
+  if (!binding) {
+    const segment = state.segments[segmentIndex];
+    return cellCenter(endpoint === "start" ? segment.start : segment.end);
   }
-  solveJointConstraints();
 
-  analyzeForces(1);
+  const assembly = state.assemblies.get(binding.assemblyId);
+  const key = endpoint === "start" ? binding.startKey : binding.endKey;
+  return worldFromLocal(assembly, assembly.nodeLocals.get(key));
+}
 
-  let movingBodies = 0;
-  state.bodyStates.forEach((body, index) => {
-    if (state.segments[index].broken) {
-      movingBodies += Math.abs(body.vx) + Math.abs(body.vy) + Math.abs(body.omega) > 0.02 ? 1 : 0;
-      return;
-    }
-    if (Math.abs(body.vx) > 0.02 || Math.abs(body.vy) > 0.02 || Math.abs(body.omega) > world.settleAngularVelocity) {
-      movingBodies += 1;
-    }
-  });
-  state.jointStates.forEach((joint) => {
-    if (!joint.anchored && (Math.abs(joint.vx) > 0.02 || Math.abs(joint.vy) > 0.02)) {
-      movingBodies += 1;
-    }
-  });
-
-  if (movingBodies === 0) {
-    state.physicsActive = false;
-    setStatus(Number(controls.brokenCount.textContent) === 0 ? "Settled" : "Settled with breaks");
+function getWorldPointForJoint(joint) {
+  const key = keyForCell(joint);
+  const free = state.freeJoints.get(key);
+  if (free) {
+    return { x: free.x, y: free.y };
   }
-}
 
-function getBodyLocalPoint(body, endpoint) {
-  return {
-    x: endpoint === "start" ? -body.length * 0.5 : body.length * 0.5,
-    y: 0,
-  };
-}
-
-function getBodyPoint(body, endpoint) {
-  const local = getBodyLocalPoint(body, endpoint);
-  const cos = Math.cos(body.angle);
-  const sin = Math.sin(body.angle);
-  return {
-    x: body.x + local.x * cos - local.y * sin,
-    y: body.y + local.x * sin + local.y * cos,
-  };
-}
-
-function getBodyPointVelocity(body, endpoint) {
-  const local = getBodyLocalPoint(body, endpoint);
-  const cos = Math.cos(body.angle);
-  const sin = Math.sin(body.angle);
-  const worldOffset = {
-    x: local.x * cos - local.y * sin,
-    y: local.x * sin + local.y * cos,
-  };
-  return {
-    x: body.vx - body.omega * worldOffset.y,
-    y: body.vy + body.omega * worldOffset.x,
-  };
-}
-
-function applyBodyPointCorrection(body, endpoint, correction, strength = 1) {
-  applyBodyPointCorrectionWithMode(body, endpoint, correction, strength, true);
-}
-
-function applyBodyPointCorrectionWithMode(body, endpoint, correction, strength = 1, allowRotation = true) {
-  const local = getBodyLocalPoint(body, endpoint);
-  body.x += correction.x * 0.5 * strength;
-  body.y += correction.y * 0.5 * strength;
-  if (allowRotation) {
-    const torque = (local.x * correction.y - local.y * correction.x) / Math.max(body.inertia, 1);
-    body.angle += torque * 0.12 * strength;
+  for (const assembly of state.assemblies.values()) {
+    const local = assembly.nodeLocals.get(key);
+    if (local) {
+      return worldFromLocal(assembly, local);
+    }
   }
+
+  return cellCenter(joint);
 }
 
-function applyBodyPointVelocityDelta(body, endpoint, delta) {
-  const local = getBodyLocalPoint(body, endpoint);
-  body.vx += delta.x * 0.2;
-  body.vy += delta.y * 0.2;
-  const impulseTorque = (local.x * delta.y - local.y * delta.x) / Math.max(body.inertia, 1);
-  body.omega += impulseTorque * 1.1;
-  clampBodyMotion(body);
-}
+function distributeAssemblyImpact(assembly, sourceSegmentIndex, impactMagnitude) {
+  const visited = new Set([sourceSegmentIndex]);
+  const queue = [{ segmentIndex: sourceSegmentIndex, depth: 0 }];
 
-function applyBodyPointVelocityMatch(body, endpoint, targetVelocity, strength = 0.12) {
-  const current = getBodyPointVelocity(body, endpoint);
-  applyBodyPointVelocityDelta(body, endpoint, {
-    x: (targetVelocity.x - current.x) * strength,
-    y: (targetVelocity.y - current.y) * strength,
-  });
-}
+  while (queue.length > 0) {
+    const { segmentIndex, depth } = queue.shift();
+    const attenuation = Math.pow(0.72, depth);
+    const segment = state.segments[segmentIndex];
+    segment.impactForce = Math.max(segment.impactForce ?? 0, impactMagnitude * attenuation);
 
-function clampBodyMotion(body) {
-  body.vx = clamp(body.vx, -world.maxLinearSpeed, world.maxLinearSpeed);
-  body.vy = clamp(body.vy, -world.maxLinearSpeed, world.maxLinearSpeed);
-  body.omega = clamp(body.omega, -world.maxAngularSpeed, world.maxAngularSpeed);
-}
-
-function solveJointConstraints() {
-  state.jointStates.forEach((jointState) => {
-    const attachments = jointState.attachments.filter(
-      ({ segmentIndex }) => !state.segments[segmentIndex].broken,
-    );
-
-    if (attachments.length === 0) {
-      return;
-    }
-
-    const points = attachments.map(({ segmentIndex, endpoint }) =>
-      getBodyPoint(state.bodyStates.get(segmentIndex), endpoint),
-    );
-
-    const averagePoint = {
-      x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
-      y: points.reduce((sum, point) => sum + point.y, 0) / points.length,
-    };
-
-    const target = jointState.anchored
-      ? cellCenter(jointState.joint)
-      : averagePoint;
-
-    if (!jointState.anchored) {
-      jointState.x = target.x;
-      jointState.y = target.y;
-
-      const averageVelocity = attachments.reduce(
-        (accumulator, { segmentIndex, endpoint }) => {
-          const velocity = getBodyPointVelocity(state.bodyStates.get(segmentIndex), endpoint);
-          return {
-            x: accumulator.x + velocity.x,
-            y: accumulator.y + velocity.y,
-          };
-        },
-        { x: 0, y: 0 },
-      );
-
-      jointState.vx = averageVelocity.x / attachments.length;
-      jointState.vy = averageVelocity.y / attachments.length;
-    } else {
-      jointState.x = target.x;
-      jointState.y = target.y;
-      jointState.vx = 0;
-      jointState.vy = 0;
-    }
-
-    attachments.forEach(({ segmentIndex, endpoint }) => {
-      const body = state.bodyStates.get(segmentIndex);
-      const point = getBodyPoint(body, endpoint);
-      const correction = {
-        x: target.x - point.x,
-        y: target.y - point.y,
-      };
-      applyBodyPointCorrection(body, endpoint, correction, jointState.anchored ? 1 : 1);
-      applyBodyPointVelocityMatch(
-        body,
-        endpoint,
-        jointState.anchored
-          ? { x: 0, y: 0 }
-          : { x: jointState.vx, y: jointState.vy },
-        jointState.anchored ? 0.08 : 0.16,
-      );
+    (assembly.adjacency.get(segmentIndex) ?? []).forEach((neighbor) => {
+      if (!visited.has(neighbor)) {
+        visited.add(neighbor);
+        queue.push({ segmentIndex: neighbor, depth: depth + 1 });
+      }
     });
-  });
+  }
 }
 
-function solveGroundCollisions() {
+function solveAssemblyGroundCollisions() {
   const groundY = getGroundY();
 
-  state.bodyStates.forEach((body, index) => {
-    const segment = state.segments[index];
-    const contacts = ["start", "end"]
-      .map((endpoint) => {
-        const point = getBodyPoint(body, endpoint);
-        return {
-          endpoint,
-          point,
-          penetration: point.y - groundY,
-          velocity: getBodyPointVelocity(body, endpoint),
-        };
-      })
-      .filter((contact) => contact.penetration > 0);
+  state.assemblies.forEach((assembly) => {
+    const contacts = [];
+
+    assembly.segmentIndexes.forEach((segmentIndex) => {
+      const binding = state.segmentBindings.get(segmentIndex);
+      ["start", "end"].forEach((endpoint) => {
+        const key = endpoint === "start" ? binding.startKey : binding.endKey;
+        const local = assembly.nodeLocals.get(key);
+        const point = worldFromLocal(assembly, local);
+        if (point.y > groundY) {
+          contacts.push({
+            segmentIndex,
+            local,
+            penetration: point.y - groundY,
+            velocity: velocityAtLocalPoint(assembly, local),
+          });
+        }
+      });
+    });
 
     if (contacts.length === 0) {
       return;
@@ -670,55 +697,140 @@ function solveGroundCollisions() {
       contact.penetration > best.penetration ? contact : best,
     );
 
-    applyBodyPointCorrectionWithMode(
-      body,
-      deepest.endpoint,
-      { x: 0, y: -deepest.penetration },
-      1,
-      false,
-    );
+    assembly.y -= deepest.penetration;
 
     if (deepest.velocity.y > 0) {
-      const nextVelocity = {
-        x: deepest.velocity.x * (1 - world.groundFriction),
-        y: -deepest.velocity.y * world.groundBounce,
-      };
-      applyBodyPointVelocityDelta(body, deepest.endpoint, {
-        x: nextVelocity.x - deepest.velocity.x,
-        y: nextVelocity.y - deepest.velocity.y,
+      const normalImpulse = -deepest.velocity.y * assembly.mass * (1 + world.groundBounce);
+      const frictionImpulse = -deepest.velocity.x * assembly.mass * world.groundFriction;
+      applyImpulseAtLocalPoint(assembly, deepest.local, {
+        x: frictionImpulse,
+        y: normalImpulse,
       });
-      segment.impactForce = Math.max(
-        segment.impactForce ?? 0,
-        body.mass * Math.abs(deepest.velocity.y) * world.impactForceScale,
+
+      distributeAssemblyImpact(
+        assembly,
+        deepest.segmentIndex,
+        Math.abs(normalImpulse) * world.impactForceScale / Math.max(assembly.segmentIndexes.length, 1),
       );
     }
 
-    if (contacts.length === 2) {
-      body.omega *= 0.92;
-      body.vx *= 1 - world.groundFriction;
+    if (contacts.length > 1) {
+      assembly.omega *= 0.9;
+      assembly.vx *= 1 - world.groundFriction;
     }
 
-    if (Math.abs(body.vy) < world.settleVelocity) {
-      body.vy = 0;
+    if (Math.abs(assembly.vy) < world.settleVelocity) {
+      assembly.vy = 0;
     }
-    if (Math.abs(body.omega) < world.settleAngularVelocity) {
-      body.omega = 0;
+    if (Math.abs(assembly.omega) < world.settleAngularVelocity) {
+      assembly.omega = 0;
     }
-    clampBodyMotion(body);
+    clampAssemblyMotion(assembly);
   });
 
-  state.jointStates.forEach((jointState) => {
-    if (jointState.y <= groundY) {
+  state.freeJoints.forEach((joint) => {
+    if (joint.y <= groundY) {
       return;
     }
 
-    jointState.y = groundY;
-    jointState.vy *= -world.groundBounce;
-    jointState.vx *= 1 - world.groundFriction;
-    if (Math.abs(jointState.vy) < world.settleVelocity) {
-      jointState.vy = 0;
+    joint.y = groundY;
+    joint.vy *= -world.groundBounce;
+    joint.vx *= 1 - world.groundFriction;
+    if (Math.abs(joint.vy) < world.settleVelocity) {
+      joint.vy = 0;
     }
   });
+}
+
+function analyzeForces(loadFactor = 1) {
+  const gravityLoad = loadFactor * world.gravityForceScale;
+  let maxForce = 0;
+  let brokenCount = 0;
+  let breakTriggered = false;
+
+  state.segments.forEach((segment) => {
+    segment.force = 0;
+  });
+
+  state.assemblies.forEach((assembly) => {
+    const gravityPerSegment = (assembly.mass * gravityLoad) / Math.max(assembly.segmentIndexes.length, 1);
+
+    assembly.segmentIndexes.forEach((segmentIndex) => {
+      const segment = state.segments[segmentIndex];
+      const impactForce = segment.impactForce ?? 0;
+      const force = gravityPerSegment + impactForce;
+      segment.force = force;
+      maxForce = Math.max(maxForce, force);
+
+      if (!segment.broken && force > materialConfig[segment.material].threshold) {
+        segment.broken = true;
+        breakTriggered = true;
+      }
+    });
+  });
+
+  brokenCount = state.segments.filter((segment) => segment.broken).length;
+  state.maxForce = maxForce;
+  controls.appliedLoad.textContent = `${gravityLoad.toFixed(0)} kN`;
+  controls.maxForce.textContent = `${maxForce.toFixed(0)} kN`;
+  controls.brokenCount.textContent = `${brokenCount}`;
+
+  if (breakTriggered) {
+    initializeAssemblies(true);
+  }
+}
+
+function updatePhysics() {
+  if (!state.physicsActive) {
+    return;
+  }
+
+  state.segments.forEach((segment) => {
+    segment.impactForce = (segment.impactForce ?? 0) * 0.85;
+  });
+
+  state.assemblies.forEach((assembly) => {
+    assembly.vy += world.gravityStep;
+    assembly.vx *= world.airDamping;
+    assembly.vy *= world.airDamping;
+    assembly.omega *= world.angularDamping;
+    clampAssemblyMotion(assembly);
+    assembly.x += assembly.vx;
+    assembly.y += assembly.vy;
+    assembly.angle += assembly.omega;
+  });
+
+  state.freeJoints.forEach((joint) => {
+    joint.vy += world.gravityStep;
+    joint.vx *= world.airDamping;
+    joint.vy *= world.airDamping;
+    joint.x += joint.vx;
+    joint.y += joint.vy;
+  });
+
+  solveAssemblyGroundCollisions();
+  analyzeForces(1);
+
+  let movingBodies = 0;
+  state.assemblies.forEach((assembly) => {
+    if (
+      Math.abs(assembly.vx) > 0.02 ||
+      Math.abs(assembly.vy) > 0.02 ||
+      Math.abs(assembly.omega) > world.settleAngularVelocity
+    ) {
+      movingBodies += 1;
+    }
+  });
+  state.freeJoints.forEach((joint) => {
+    if (Math.abs(joint.vx) > 0.02 || Math.abs(joint.vy) > 0.02) {
+      movingBodies += 1;
+    }
+  });
+
+  if (movingBodies === 0) {
+    state.physicsActive = false;
+    setStatus(Number(controls.brokenCount.textContent) === 0 ? "Settled" : "Settled with breaks");
+  }
 }
 
 function drawGrid() {
@@ -764,13 +876,9 @@ function drawTerrain() {
   context.restore();
 }
 
-function getGroundY() {
-  return grid.offsetY + world.groundRow * grid.cell;
-}
-
 function drawSegment(segment, index) {
-  const start = getRenderedPoint(segment.start, index);
-  const end = getRenderedPoint(segment.end, index);
+  const start = getWorldPointForSegmentEndpoint(index, "start");
+  const end = getWorldPointForSegmentEndpoint(index, "end");
   const material = materialConfig[segment.material];
   const ratio = clamp(segment.force / material.threshold, 0, 1.3);
 
@@ -803,7 +911,7 @@ function drawSegment(segment, index) {
 }
 
 function drawJoint(joint) {
-  const center = getRenderedJointPoint(joint);
+  const center = getWorldPointForJoint(joint);
 
   context.save();
   context.strokeStyle = "rgba(126, 240, 197, 0.95)";
@@ -814,32 +922,6 @@ function drawJoint(joint) {
   context.fill();
   context.stroke();
   context.restore();
-}
-
-function getRenderedJointPoint(joint) {
-  if (state.physicsActive) {
-    const jointState = state.jointStates.get(keyForCell(joint));
-    if (jointState) {
-      return { x: jointState.x, y: jointState.y };
-    }
-  }
-  return cellCenter(joint);
-}
-
-function getRenderedPoint(cell, bodyIndex) {
-  const point = cellCenter(cell);
-  if (!state.physicsActive || bodyIndex === undefined || bodyIndex === null) {
-    return point;
-  }
-
-  const body = state.bodyStates.get(bodyIndex);
-  const segment = state.segments[bodyIndex];
-  if (!body || !segment) {
-    return point;
-  }
-
-  const endpoint = cellsEqual(segment.start, cell) ? "start" : "end";
-  return getBodyPoint(body, endpoint);
 }
 
 function drawPreview() {
@@ -907,7 +989,7 @@ function drawScene() {
 }
 
 function tick() {
-  updateLaunch();
+  updatePhysics();
   drawScene();
   window.requestAnimationFrame(tick);
 }
