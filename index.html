@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blue Physics Playground</title>
+    <meta
+      name="description"
+      content="A static physics playground for collecting small browser-based simulations."
+    />
+    <link rel="stylesheet" href="assets/css/site.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <p class="eyebrow">Static playground</p>
+        <h1>Blue Physics Playground</h1>
+        <p class="hero-copy">
+          A GitHub Pages-friendly home for experiments, toys, and simulations.
+          Each simulation lives on its own page and gets linked from here.
+        </p>
+      </header>
+
+      <main>
+        <section class="section-header">
+          <div>
+            <p class="eyebrow">Simulations</p>
+            <h2>Current Build</h2>
+          </div>
+          <p class="section-copy">
+            The first simulation is an epicycle chain: nested rotating arms that
+            trace a path as they orbit.
+          </p>
+        </section>
+
+        <section class="simulation-grid">
+          <article class="simulation-card simulation-card-featured">
+            <div class="card-badge">Playable now</div>
+            <h3>Epicycles</h3>
+            <p>
+              Linked rotating circles and arms. Add more segments, change the
+              speed, and watch the trail emerge.
+            </p>
+            <a class="button button-primary" href="simulations/epicycles.html">
+              Open Epicycles
+            </a>
+          </article>
+
+          <article class="simulation-card simulation-card-muted">
+            <div class="card-badge">Reserved slot</div>
+            <h3>More coming</h3>
+            <p>
+              This card structure is ready for future experiments without
+              changing the landing page layout.
+            </p>
+            <span class="button button-ghost" aria-disabled="true">
+              Next simulation
+            </span>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <script src="assets/js/site.js"></script>
+  </body>
+</html>

@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Epicycles | Blue Physics Playground</title>
+    <meta
+      name="description"
+      content="Explore a chain of rotating circles and nested arms."
+    />
+    <link rel="stylesheet" href="../assets/css/site.css" />
+  </head>
+  <body>
+    <div class="page-shell simulation-page">
+      <header class="simulation-header">
+        <div>
+          <p class="eyebrow">Simulation 01</p>
+          <h1>Epicycles</h1>
+          <p class="hero-copy">
+            Nested rotating circles whose endpoints become the center of the
+            next arm. The final point leaves a trail.
+          </p>
+        </div>
+        <a class="button button-ghost" href="../index.html">Back to main page</a>
+      </header>
+
+      <main class="simulation-layout">
+        <section class="control-panel">
+          <h2>Controls</h2>
+
+          <label class="control-row" for="segments">
+            <span>Segments</span>
+            <output id="segments-value" for="segments">4</output>
+          </label>
+          <input id="segments" type="range" min="1" max="8" step="1" value="4" />
+
+          <label class="control-row" for="speed">
+            <span>Base speed</span>
+            <output id="speed-value" for="speed">1.00x</output>
+          </label>
+          <input id="speed" type="range" min="0.2" max="2.5" step="0.1" value="1" />
+
+          <label class="control-row" for="trail">
+            <span>Trail length</span>
+            <output id="trail-value" for="trail">700</output>
+          </label>
+          <input id="trail" type="range" min="80" max="2000" step="20" value="700" />
+
+          <div class="button-row">
+            <button class="button button-primary" id="randomize" type="button">
+              Randomize
+            </button>
+            <button class="button button-ghost" id="pause" type="button">
+              Pause
+            </button>
+            <button class="button button-ghost" id="clear-trail" type="button">
+              Clear trail
+            </button>
+          </div>
+
+          <p class="panel-note">
+            Each segment rotates at a different rate and scale. Randomize to
+            generate a new chain without leaving the page.
+          </p>
+        </section>
+
+        <section class="canvas-panel">
+          <canvas
+            id="epicycle-canvas"
+            aria-label="Epicycle simulation canvas"
+          ></canvas>
+        </section>
+      </main>
+    </div>
+
+    <script src="../assets/js/site.js"></script>
+    <script type="module" src="../assets/js/simulations/epicycles.js"></script>
+  </body>
+</html>
