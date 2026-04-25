@@ -179,6 +179,32 @@ function snapCell(cell) {
   return findNearestJoint(cell) ?? findNearestSegmentEndpoint(cell) ?? cell;
 }
 
+function canonicalizeStructure() {
+  const canonicalJointMap = new Map();
+  const dedupedJoints = [];
+
+  state.joints.forEach((joint) => {
+    const key = keyForCell(joint);
+    if (!canonicalJointMap.has(key)) {
+      canonicalJointMap.set(key, joint);
+      dedupedJoints.push(joint);
+    }
+  });
+
+  state.joints = dedupedJoints;
+
+  state.segments = state.segments.map((segment) => {
+    const startJoint = canonicalJointMap.get(keyForCell(segment.start));
+    const endJoint = canonicalJointMap.get(keyForCell(segment.end));
+
+    return {
+      ...segment,
+      start: startJoint ?? segment.start,
+      end: endJoint ?? segment.end,
+    };
+  });
+}
+
 function toggleJoint(cell) {
   const snappedCell = findNearestSegmentEndpoint(cell) ?? cell;
   const existingIndex = state.joints.findIndex((joint) => cellsEqual(joint, snappedCell));
@@ -188,6 +214,7 @@ function toggleJoint(cell) {
   }
 
   state.joints.push(snappedCell);
+  canonicalizeStructure();
 }
 
 function analyzeForces(loadFactor = 1) {
@@ -295,6 +322,8 @@ function addSegment(start, end, material) {
     broken: false,
     force: 0,
   });
+
+  canonicalizeStructure();
 }
 
 function removeNearestSegment(cell) {
@@ -335,6 +364,7 @@ function removeNearestSegment(cell) {
     } else {
       state.joints.splice(bestIndex, 1);
     }
+    canonicalizeStructure();
   }
 }
 
@@ -360,6 +390,7 @@ function pointToSegmentDistance(point, start, end) {
 }
 
 function resetDamage() {
+  canonicalizeStructure();
   state.segments.forEach((segment) => {
     segment.broken = false;
     segment.force = 0;
@@ -406,6 +437,7 @@ function launch() {
     return;
   }
 
+  canonicalizeStructure();
   state.segments.forEach((segment) => {
     segment.broken = false;
     segment.force = 0;
