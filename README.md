@@ -5,10 +5,11 @@ Static GitHub Pages playground for browser-based simulations.
 ## Structure
 
 - `index.html`: landing page for the simulation library
-- `simulations/epicycles.html`: first simulation page
+- `simulations/<name>/`: one folder per simulation
+- `simulations/epicycles/index.html`: first simulation page
+- `simulations/epicycles/app.js`: epicycle animation logic
 - `assets/css/site.css`: shared site styling
 - `assets/js/site.js`: shared site bootstrap
-- `assets/js/simulations/epicycles.js`: epicycle animation logic
 
 ## First Simulation
 
